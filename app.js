@@ -215,7 +215,40 @@ async function updateStudentInIndex(token, patch) {
 async function removeStudentFromIndex(token) {
   const next = state.students.filter(s => s.token !== token);
   await setDoc(teacherIndexRef(), { students: next }, { merge: true });
-  // 投稿サブコレクションは残置（手動削除可能、誤削除防止のため自動消去しない）
+  // 投稿サブコレクションは残置（誤削除防止のため自動消去しない）
+}
+
+async function completelyRemoveStudent(token) {
+  // 1. その選手の全投稿を取得
+  const postsCol = collection(db, 'students', token, 'posts');
+  const postsSnap = await getDocs(postsCol);
+
+  // 2. 各投稿に紐づくコーチ下書きを削除
+  const draftDeletes = [];
+  postsSnap.forEach(d => {
+    draftDeletes.push(deleteDoc(coachDraftRef(d.id)).catch(() => {}));
+  });
+  await Promise.all(draftDeletes);
+
+  // 3. 投稿本体を削除
+  const postDeletes = [];
+  postsSnap.forEach(d => {
+    postDeletes.push(deleteDoc(doc(db, 'students', token, 'posts', d.id)));
+  });
+  await Promise.all(postDeletes);
+
+  // 4. 名簿から外す
+  const next = state.students.filter(s => s.token !== token);
+  await setDoc(teacherIndexRef(), { students: next }, { merge: true });
+
+  // 5. ローカル購読の解除
+  const unsub = subscriptions.get('posts:' + token);
+  if (unsub) {
+    unsub();
+    subscriptions.delete('posts:' + token);
+  }
+  delete state.postsByStudent[token];
+  if (state.activeStudentToken === token) state.activeStudentToken = null;
 }
 
 async function createPost(token, postData) {
@@ -1117,11 +1150,12 @@ function renderSettings(root) {
               <button class="link-btn" data-action="qr">QRを表示</button>
               <button class="link-btn" data-action="archive">アーカイブを開く</button>
               <button class="link-btn" data-action="regen">URL再発行</button>
+              <button class="link-btn" data-action="remove">名簿から外す</button>
+              <button class="link-btn danger" data-action="purge">完全削除</button>
             </div>
             <div class="qr-area hidden" data-qr></div>
           </div>
           <button class="icon-btn" data-action="rename" aria-label="名前変更">✎</button>
-          <button class="icon-btn" data-action="delete" aria-label="削除">×</button>
         </div>`;
       }).join('');
 
@@ -1182,13 +1216,36 @@ function renderSettings(root) {
         }
       }
     });
-    row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+    row.querySelector('[data-action="remove"]').addEventListener('click', async () => {
       const cur = state.students.find(s => s.token === token);
-      if (!confirm(`${cur.name} さんを名簿から外しますか？\n（投稿データはFirestoreに残ります。完全削除はFirebaseコンソールから）`)) return;
+      if (!confirm(`${cur.name} さんを名簿から外しますか？\n\n・名簿から消えますが、投稿データはFirestoreに残ります\n・同じURLトークンを再登録すれば復活できます`)) return;
       try {
         await removeStudentFromIndex(token);
       } catch (err) {
-        alert('削除に失敗しました：' + err.message);
+        alert('処理に失敗しました：' + err.message);
+      }
+    });
+
+    row.querySelector('[data-action="purge"]').addEventListener('click', async () => {
+      const cur = state.students.find(s => s.token === token);
+      const postCount = (state.postsByStudent[token] || []).length;
+      const msg = `⚠️ 完全削除：${cur.name} さんと、その投稿 ${postCount}件・地の文返しすべてを永久に削除します。\n\nこの操作は取り消せません。本当に進めますか？`;
+      if (!confirm(msg)) return;
+      // 二重確認
+      const typed = prompt(`念のため確認です。\n選手の名前「${cur.name}」を入力してください：`);
+      if (typed !== cur.name) {
+        if (typed !== null) alert('名前が一致しないため中止しました。');
+        return;
+      }
+      const btn = row.querySelector('[data-action="purge"]');
+      btn.disabled = true;
+      btn.textContent = '削除中…';
+      try {
+        await completelyRemoveStudent(token);
+      } catch (err) {
+        alert('完全削除に失敗しました：' + err.message);
+        btn.disabled = false;
+        btn.textContent = '完全削除';
       }
     });
 

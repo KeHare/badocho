@@ -492,6 +492,8 @@ body {
 }
 .link-btn:hover { color: var(--ink); }
 .link-btn:disabled { color: var(--ink-soft); cursor: default; text-decoration: none; }
+.link-btn.danger { color: var(--warn); }
+.link-btn.danger:hover { color: #6e2010; }
 
 .qr-area {
   margin-top: 8px;
