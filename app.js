@@ -42,6 +42,34 @@ const CATEGORIES = [
   { id: 'mind', label: '心' },
   { id: 'gear', label: '道具' },
 ];
+
+// 入力プロンプト（投稿欄プレースホルダの巡回ストック・けろ先生らしい問い）
+const PROMPTS = [
+  'コートで何の音がした？',
+  '今日の足は重かった？軽かった？',
+  '最後の1点、どんな気持ちだった？',
+  '相手のラケットの色を覚えてる？',
+  '今日いちばん気になった一場面は？',
+  '体育館の空気はどんな匂いだった？',
+  'ふとした瞬間に思ったこと、ひとことだけ',
+  '今日のあなたは、何を見ていた？',
+  'うまくいかなかった時、何を考えていた？',
+  '今日のシューズの紐、ぎゅっと締めた？',
+  'ペアの背中、どう見えた？',
+  '試合前、心はどこにあった？',
+  '次やるとき、何を変えたい？',
+  '練習の終わり、どんな顔してた？',
+  '今日は誰の声が一番聞こえた？',
+  'コートの線、はっきり見えた？',
+  '休憩中、何を飲んだ？',
+  '今日のシャトルは、どんなふうに飛んだ？',
+  '帰り道、何を考えていた？',
+  '今日は、何があった日？（一文字でも）',
+];
+
+function randomPrompt() {
+  return PROMPTS[Math.floor(Math.random() * PROMPTS.length)];
+}
 const CAT_LABEL = Object.fromEntries(CATEGORIES.map(c => [c.id, c.label]));
 
 const params = new URLSearchParams(location.search);
@@ -70,6 +98,8 @@ let state = {
   rereadMonth: 'all', // 'all' | 'YYYY-MM'
   journal: [],
   editingJournalId: null,
+  editingPostId: null,
+  cleanupHandlers: [],
 };
 
 const subscriptions = new Map();
@@ -94,6 +124,19 @@ function fmtDate(iso) {
   const date = new Date(y, m - 1, d);
   const wk = ['日', '月', '火', '水', '木', '金', '土'][date.getDay()];
   return `${y}年${m}月${d}日（${wk}）`;
+}
+
+async function resizeImageToDataURL(file, maxSize = 1280, quality = 0.7) {
+  const img = await createImageBitmap(file);
+  const ratio = Math.min(maxSize / img.width, maxSize / img.height, 1);
+  const w = Math.round(img.width * ratio);
+  const h = Math.round(img.height * ratio);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL('image/jpeg', quality);
 }
 
 function fmtAgo(iso) {
@@ -129,9 +172,17 @@ function escapeHtml(s) {
 }
 
 function navigate(view, opts = {}) {
+  // 画面離脱時のクリーンアップ（presence・購読など）
+  if (state.cleanupHandlers && state.cleanupHandlers.length > 0) {
+    state.cleanupHandlers.forEach(fn => { try { fn(); } catch {} });
+    state.cleanupHandlers = [];
+  }
   state.view = view;
   if ('postId' in opts) state.activePostId = opts.postId;
   if ('studentToken' in opts) state.activeStudentToken = opts.studentToken;
+  if ('editingPostId' in opts) state.editingPostId = opts.editingPostId;
+  // home に戻る時は編集状態をリセット
+  if (view === 'home') state.editingPostId = null;
   render();
   window.scrollTo(0, 0);
 }
@@ -262,7 +313,25 @@ async function createPost(token, postData) {
 }
 
 async function deletePost(token, postId) {
+  // 関連する下書きも一緒に消す
+  await deleteDoc(coachDraftRef(postId)).catch(() => {});
   await deleteDoc(postRef(token, postId));
+}
+
+async function updatePost(token, postId, patch) {
+  // 本文・写真・カテゴリ・日付のみ更新可。responses/createdAt は触らない
+  const allowed = {};
+  if ('date' in patch) allowed.date = patch.date;
+  if ('body' in patch) allowed.body = patch.body;
+  if ('photoData' in patch) allowed.photoData = patch.photoData;
+  if ('photoUrl' in patch) allowed.photoUrl = patch.photoUrl;
+  if ('categories' in patch) allowed.categories = patch.categories;
+  allowed.editedAt = new Date().toISOString();
+  await setDoc(postRef(token, postId), allowed, { merge: true });
+}
+
+function getPhotoSrc(post) {
+  return post.photoData || post.photoUrl || '';
 }
 
 async function regenerateStudentToken(oldToken) {
@@ -385,11 +454,13 @@ async function deleteJournalEntry(id) {
   await deleteDoc(doc(journalCol(), id));
 }
 
-async function appendResponse(token, postId, body) {
+async function appendResponse(token, postId, body, from) {
+  // from: 'teacher' | 'student'。互換性のため未指定時は 'teacher'
   const response = {
     id: uid(),
     createdAt: new Date().toISOString(),
     body,
+    from: from || 'teacher',
   };
   await updateDoc(postRef(token, postId), {
     responses: arrayUnion(response),
@@ -403,6 +474,24 @@ function render() {
   const back = document.getElementById('backBtn');
   const settings = document.getElementById('settingsBtn');
   const title = document.getElementById('headerTitle');
+  const modeBadge = document.getElementById('modeBadge');
+
+  // モード明示バッジ
+  if (modeBadge) {
+    if (mode === 'teacher') {
+      modeBadge.textContent = 'けろ先生';
+      modeBadge.className = 'mode-badge mode-teacher';
+    } else if (mode === 'student') {
+      modeBadge.textContent = 'あなた';
+      modeBadge.className = 'mode-badge mode-student';
+    } else if (mode === 'archive') {
+      modeBadge.textContent = 'アーカイブ';
+      modeBadge.className = 'mode-badge mode-archive';
+    } else {
+      modeBadge.textContent = '';
+      modeBadge.className = 'mode-badge';
+    }
+  }
 
   if (mode === 'setup') {
     back.classList.add('hidden');
@@ -658,6 +747,23 @@ function renderCompose(root) {
     ? (state.students.find(s => s.token === state.activeStudentToken)?.name || '?')
     : '（自分）';
 
+  // 編集モード判定：state.editingPostId が設定されていれば編集
+  const editingId = state.editingPostId;
+  const targetToken = mode === 'student' ? studentToken : state.activeStudentToken;
+  let editingPost = null;
+  if (editingId) {
+    const posts = state.postsByStudent[targetToken] || [];
+    editingPost = posts.find(p => p.id === editingId);
+  }
+  const isEdit = !!editingPost;
+
+  const initial = {
+    date: editingPost?.date || todayISO(),
+    body: editingPost?.body || '',
+    photoData: editingPost?.photoData || editingPost?.photoUrl || '', // 旧データ互換
+    categories: editingPost?.categories || [],
+  };
+
   root.innerHTML = `
     <div class="form-group">
       <label class="form-label">選手</label>
@@ -665,26 +771,37 @@ function renderCompose(root) {
     </div>
     <div class="form-group">
       <label class="form-label" for="dateInput">日付</label>
-      <input class="form-input" type="date" id="dateInput" value="${todayISO()}">
+      <input class="form-input" type="date" id="dateInput" value="${initial.date}">
     </div>
     <div class="form-group">
       <label class="form-label">カテゴリ（任意・複数可）</label>
       <div class="cat-toggles">
-        ${CATEGORIES.map(c => `<button type="button" class="cat-toggle" data-cat="${c.id}">${c.label}</button>`).join('')}
+        ${CATEGORIES.map(c => `<button type="button" class="cat-toggle ${initial.categories.includes(c.id) ? 'on' : ''}" data-cat="${c.id}">${c.label}</button>`).join('')}
       </div>
     </div>
     <div class="form-group">
       <label class="form-label" for="bodyInput">本文（書かなくてもOK）</label>
-      <textarea class="form-textarea" id="bodyInput" placeholder="今日のひと言・気になったこと・うまくいかなかった一場面…&#10;（何も書かずに「いた印」だけ残してもいい）"></textarea>
+      <textarea class="form-textarea" id="bodyInput" placeholder="${escapeHtml(randomPrompt())}">${escapeHtml(initial.body)}</textarea>
+      <div class="small prompt-hint">問いはきっかけ。書かないという選択もここでは正解です。</div>
     </div>
     <div class="form-group">
-      <label class="form-label" for="photoInput">写真URL（任意）</label>
-      <input class="form-input" type="url" id="photoInput" placeholder="https://...">
+      <label class="form-label">写真（任意）</label>
+      <input type="file" id="photoFileInput" accept="image/*" capture="environment" style="display:none">
+      <div class="photo-zone">
+        <img id="photoPreview" class="photo-preview ${initial.photoData ? '' : 'hidden'}" src="${initial.photoData || ''}" alt="">
+        <div class="photo-actions">
+          <button type="button" class="btn btn-secondary" id="pickPhotoBtn">${initial.photoData ? '別の写真に差し替える' : '📷 写真を選ぶ'}</button>
+          ${initial.photoData ? `<button type="button" class="btn btn-secondary" id="removePhotoBtn">写真を外す</button>` : ''}
+        </div>
+        <div class="small" id="photoStatus"></div>
+      </div>
     </div>
-    <button class="btn btn-primary" id="saveBtn">保存する</button>
+    <button class="btn btn-primary" id="saveBtn">${isEdit ? '上書き保存' : '保存する'}</button>
   `;
 
-  const selectedCats = new Set();
+  const selectedCats = new Set(initial.categories);
+  let currentPhotoData = initial.photoData;
+
   root.querySelectorAll('.cat-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
       const c = btn.dataset.cat;
@@ -698,57 +815,115 @@ function renderCompose(root) {
     });
   });
 
+  // 写真選択ハンドラ
+  const fileInput = document.getElementById('photoFileInput');
+  const pickBtn = document.getElementById('pickPhotoBtn');
+  const preview = document.getElementById('photoPreview');
+  const photoStatus = document.getElementById('photoStatus');
+
+  pickBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    photoStatus.textContent = '画像を準備中…';
+    try {
+      currentPhotoData = await resizeImageToDataURL(file, 1280, 0.7);
+      preview.src = currentPhotoData;
+      preview.classList.remove('hidden');
+      pickBtn.textContent = '別の写真に差し替える';
+      // サイズ表示（KB）
+      const sizeKB = Math.round(currentPhotoData.length * 0.75 / 1024);
+      photoStatus.textContent = `読み込み完了（約${sizeKB}KB）`;
+      // 「写真を外す」ボタンを動的追加
+      let removeBtn = document.getElementById('removePhotoBtn');
+      if (!removeBtn) {
+        removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn btn-secondary';
+        removeBtn.id = 'removePhotoBtn';
+        removeBtn.textContent = '写真を外す';
+        pickBtn.parentNode.appendChild(removeBtn);
+        removeBtn.addEventListener('click', removePhoto);
+      }
+    } catch (err) {
+      photoStatus.textContent = '読み込みに失敗：' + err.message;
+    }
+  });
+
+  function removePhoto() {
+    currentPhotoData = '';
+    preview.src = '';
+    preview.classList.add('hidden');
+    fileInput.value = '';
+    pickBtn.textContent = '📷 写真を選ぶ';
+    photoStatus.textContent = '';
+    const removeBtn = document.getElementById('removePhotoBtn');
+    if (removeBtn) removeBtn.remove();
+  }
+  const initialRemoveBtn = document.getElementById('removePhotoBtn');
+  if (initialRemoveBtn) initialRemoveBtn.addEventListener('click', removePhoto);
+
   document.getElementById('saveBtn').addEventListener('click', async () => {
     const date = document.getElementById('dateInput').value || todayISO();
     const body = document.getElementById('bodyInput').value.trim();
-    const photoUrl = document.getElementById('photoInput').value.trim();
+    const photoData = currentPhotoData;
     // 無言ポスト許容：何もなくても投稿成立。日付・カテゴリだけの「いた印」も断片の最小単位
-    const targetToken = mode === 'student' ? studentToken : state.activeStudentToken;
     if (!targetToken) {
       alert('対象の選手が選ばれていません。');
       return;
     }
 
-    // 失敗時の保険：未送信の下書きをlocalStorageに退避
-    const draft = { date, body, photoUrl, categories: Array.from(selectedCats), savedAt: Date.now() };
-    localStorage.setItem('badcho.draft', JSON.stringify(draft));
+    // 失敗時の保険：未送信の下書きをlocalStorageに退避（写真は重いので含めない）
+    const draftKey = isEdit ? `badcho.draft.edit.${editingId}` : 'badcho.draft';
+    const draft = { date, body, categories: Array.from(selectedCats), savedAt: Date.now() };
+    localStorage.setItem(draftKey, JSON.stringify(draft));
 
     const btn = document.getElementById('saveBtn');
     btn.disabled = true;
-    btn.textContent = '保存中…';
+    btn.textContent = isEdit ? '更新中…' : '保存中…';
     try {
-      const id = await createPost(targetToken, { date, body, photoUrl, categories: Array.from(selectedCats) });
-      localStorage.removeItem('badcho.draft');
-      navigate('detail', { postId: id });
+      const payload = { date, body, photoData, categories: Array.from(selectedCats) };
+      if (isEdit) {
+        await updatePost(targetToken, editingId, payload);
+        localStorage.removeItem(draftKey);
+        state.editingPostId = null;
+        navigate('detail', { postId: editingId });
+      } else {
+        const id = await createPost(targetToken, payload);
+        localStorage.removeItem(draftKey);
+        navigate('detail', { postId: id });
+      }
     } catch (err) {
       console.error(err);
       alert('保存に失敗しました。下書きはこの端末に残っています。\n' + err.message);
       btn.disabled = false;
-      btn.textContent = '保存する';
+      btn.textContent = isEdit ? '上書き保存' : '保存する';
     }
   });
 
-  // 下書き復元
-  const draftRaw = localStorage.getItem('badcho.draft');
-  if (draftRaw) {
-    try {
-      const draft = JSON.parse(draftRaw);
-      if (confirm('前回保存できなかった下書きを復元しますか？')) {
-        document.getElementById('dateInput').value = draft.date || todayISO();
-        document.getElementById('bodyInput').value = draft.body || '';
-        document.getElementById('photoInput').value = draft.photoUrl || '';
-        (draft.categories || []).forEach(c => {
-          const btn = root.querySelector(`.cat-toggle[data-cat="${c}"]`);
-          if (btn) {
-            selectedCats.add(c);
-            btn.classList.add('on');
-          }
-        });
-      } else {
-        localStorage.removeItem('badcho.draft');
+  // 下書き復元（新規投稿時のみ）
+  if (!isEdit) {
+    const draftRaw = localStorage.getItem('badcho.draft');
+    if (draftRaw) {
+      try {
+        const draft = JSON.parse(draftRaw);
+        if (confirm('前回保存できなかった下書きを復元しますか？')) {
+          document.getElementById('dateInput').value = draft.date || todayISO();
+          document.getElementById('bodyInput').value = draft.body || '';
+          // 写真は下書きには含めない（容量都合）
+          (draft.categories || []).forEach(c => {
+            const btn = root.querySelector(`.cat-toggle[data-cat="${c}"]`);
+            if (btn) {
+              selectedCats.add(c);
+              btn.classList.add('on');
+            }
+          });
+        } else {
+          localStorage.removeItem('badcho.draft');
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
   }
 }
@@ -762,35 +937,57 @@ function renderDetail(root) {
     return;
   }
   const chips = (post.categories || []).map(c => `<span class="cat-chip ${c}">${CAT_LABEL[c] || c}</span>`).join(' ');
-  const photoBlock = post.photoUrl
-    ? `<img class="detail-photo" src="${escapeHtml(post.photoUrl)}" alt="">`
+  const photoSrc = getPhotoSrc(post);
+  const photoBlock = photoSrc
+    ? `<img class="detail-photo" src="${photoSrc.startsWith('data:') ? photoSrc : escapeHtml(photoSrc)}" alt="">`
     : '';
 
   const responses = (post.responses || []).slice().sort((a, b) => a.createdAt < b.createdAt ? -1 : 1);
   const responsesHtml = responses.length === 0
-    ? `<div class="empty" style="padding:20px 0">まだ地の文返しはありません。</div>`
-    : responses.map(r => `
-        <div class="response-item">
-          <div class="ts">${fmtTimestamp(r.createdAt)}</div>
+    ? `<div class="empty" style="padding:20px 0">まだ往復はありません。</div>`
+    : responses.map(r => {
+        const from = r.from || 'teacher';
+        const fromLabel = from === 'teacher' ? 'けろ先生' : 'あなた';
+        return `
+        <div class="response-item from-${from}">
+          <div class="ts"><span class="from-label">${fromLabel}</span> · ${fmtTimestamp(r.createdAt)}</div>
           <div class="body">${escapeHtml(r.body)}</div>
         </div>
-      `).join('');
+      `;
+      }).join('');
 
-  // 選手モードでは「返し」入力欄を表示しない（読み専用）
-  const responseFormHtml = mode === 'teacher' ? `
+  // 返信フォーム（コーチ・選手の両方が書けるが、UIや文言を分ける）
+  let responseFormHtml = '';
+  if (mode === 'teacher') {
+    responseFormHtml = `
       <div class="response-form">
         <p class="hint">採点や指示ではなく、情景・観察・例えで。</p>
         <textarea class="form-textarea short" id="responseInput" placeholder="その日のコートに見えた風景を、地の文で。"></textarea>
         <div class="draft-status" id="draftStatus"></div>
         <button class="btn btn-primary" id="addResponseBtn" style="margin-top:8px">返しを記す</button>
       </div>
-  ` : '';
+    `;
+  } else if (mode === 'student') {
+    responseFormHtml = `
+      <div class="response-form student-reply">
+        <p class="hint">けろ先生への返し・追記・気づいたことなど。</p>
+        <textarea class="form-textarea short" id="responseInput" placeholder="（自由に）"></textarea>
+        <button class="btn btn-primary" id="addResponseBtn" style="margin-top:8px">返す</button>
+      </div>
+    `;
+  }
 
-  const deleteBtnHtml = mode === 'teacher' ? `
-    <div class="row-actions">
-      <button class="btn btn-danger" id="deletePostBtn">この投稿を削除</button>
-    </div>
-  ` : '';
+  // 操作ボタン：けろ先生 or 選手の両方が削除可、選手は編集可
+  let actionBtns = [];
+  if (mode === 'student') {
+    actionBtns.push(`<button class="btn btn-secondary" id="editPostBtn">この投稿を編集</button>`);
+    actionBtns.push(`<button class="btn btn-danger" id="deletePostBtn">この投稿を削除</button>`);
+  } else if (mode === 'teacher') {
+    actionBtns.push(`<button class="btn btn-danger" id="deletePostBtn">この投稿を削除</button>`);
+  }
+  const actionsHtml = actionBtns.length > 0
+    ? `<div class="row-actions">${actionBtns.join('')}</div>`
+    : '';
 
   const detailBodyHtml = post.body
     ? `<div class="detail-body">${escapeHtml(post.body)}</div>`
@@ -806,13 +1003,15 @@ function renderDetail(root) {
       ${photoBlock}
     </article>
 
+    ${mode === 'student' ? `<div class="reading-banner hidden" id="readingBanner"></div>` : ''}
+
     <section class="responses-section">
-      <h3>地の文返し</h3>
+      <h3>${mode === 'student' ? 'けろ先生からのメッセージ' : '地の文返し'}</h3>
       ${responsesHtml}
       ${responseFormHtml}
     </section>
 
-    ${deleteBtnHtml}
+    ${actionsHtml}
   `;
 
   if (mode === 'teacher') {
@@ -845,7 +1044,7 @@ function renderDetail(root) {
       const btn = document.getElementById('addResponseBtn');
       btn.disabled = true;
       try {
-        await appendResponse(targetToken, post.id, body);
+        await appendResponse(targetToken, post.id, body, 'teacher');
         await clearCoachDraft(post.id);
         ta.value = '';
         status.textContent = '';
@@ -864,6 +1063,87 @@ function renderDetail(root) {
       } catch (err) {
         alert('削除に失敗しました：' + err.message);
       }
+    });
+  }
+
+  if (mode === 'student') {
+    document.getElementById('addResponseBtn').addEventListener('click', async () => {
+      const ta = document.getElementById('responseInput');
+      const body = ta.value.trim();
+      if (!body) return;
+      const btn = document.getElementById('addResponseBtn');
+      btn.disabled = true;
+      try {
+        await appendResponse(targetToken, post.id, body, 'student');
+        ta.value = '';
+      } catch (err) {
+        alert('返信の保存に失敗しました：' + err.message);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('editPostBtn').addEventListener('click', () => {
+      navigate('compose', { editingPostId: post.id });
+    });
+
+    document.getElementById('deletePostBtn').addEventListener('click', async () => {
+      if (!confirm('この投稿を削除しますか？（取り消せません）\n\n地の文返しなど、すべての往復もまとめて消えます。')) return;
+      try {
+        await deletePost(targetToken, post.id);
+        navigate('home');
+      } catch (err) {
+        alert('削除に失敗しました：' + err.message);
+      }
+    });
+
+    // 「けろ先生がいま読んでいる」シグナル：postドキュメントを購読してcoachActiveSinceを監視
+    const banner = document.getElementById('readingBanner');
+    let displayTimer = null;
+    const updateBanner = (activeSince) => {
+      if (!activeSince) {
+        banner.classList.add('hidden');
+        return;
+      }
+      const ageMs = Date.now() - new Date(activeSince).getTime();
+      if (ageMs < 60000) {
+        banner.textContent = 'けろ先生がいま、あなたの言葉を読んでいる最中です。';
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
+    };
+    const unsubPost = onSnapshot(postRef(targetToken, post.id), snap => {
+      const data = snap.data();
+      if (data && data.coachActiveSince) {
+        updateBanner(data.coachActiveSince);
+        if (displayTimer) clearInterval(displayTimer);
+        displayTimer = setInterval(() => updateBanner(data.coachActiveSince), 10000);
+      } else {
+        updateBanner(null);
+      }
+    });
+    state.cleanupHandlers.push(() => {
+      unsubPost();
+      if (displayTimer) clearInterval(displayTimer);
+    });
+  }
+
+  // けろ先生のpresence送信（heartbeat）
+  if (mode === 'teacher') {
+    const sendPresence = async () => {
+      try {
+        await updateDoc(postRef(targetToken, post.id), {
+          coachActiveSince: new Date().toISOString(),
+        });
+      } catch {}
+    };
+    sendPresence();
+    const heartbeat = setInterval(sendPresence, 30000);
+    state.cleanupHandlers.push(() => {
+      clearInterval(heartbeat);
+      // 離脱時にpresenceクリア
+      updateDoc(postRef(targetToken, post.id), { coachActiveSince: null }).catch(() => {});
     });
   }
 }
@@ -1024,12 +1304,17 @@ function renderArchivePage(post) {
   const bodyHtml = post.body
     ? `<div class="archive-post-body">${escapeHtml(post.body)}</div>`
     : `<div class="archive-post-body silent">（無言の便り）</div>`;
-  const photoHtml = post.photoUrl
-    ? `<img class="archive-photo" src="${escapeHtml(post.photoUrl)}" alt="">`
+  const archivePhotoSrc = getPhotoSrc(post);
+  const photoHtml = archivePhotoSrc
+    ? `<img class="archive-photo" src="${archivePhotoSrc.startsWith('data:') ? archivePhotoSrc : escapeHtml(archivePhotoSrc)}" alt="">`
     : '';
   const responsesHtml = responses.length > 0
     ? `<div class="archive-responses">
-        ${responses.map(r => `<div class="archive-response">${escapeHtml(r.body)}</div>`).join('')}
+        ${responses.map(r => {
+          const from = r.from || 'teacher';
+          const fromLabel = from === 'teacher' ? 'けろ先生' : 'あなた';
+          return `<div class="archive-response from-${from}"><span class="archive-response-from">${fromLabel}</span>${escapeHtml(r.body)}</div>`;
+        }).join('')}
       </div>`
     : '';
   return `
@@ -1105,16 +1390,22 @@ function renderRereadPage(post) {
   const bodyHtml = post.body
     ? `<div class="reread-body">${escapeHtml(post.body)}</div>`
     : `<div class="reread-body silent">（無言の便り）</div>`;
-  const photoHtml = post.photoUrl
-    ? `<img class="reread-photo" src="${escapeHtml(post.photoUrl)}" alt="">`
+  const rereadPhotoSrc = getPhotoSrc(post);
+  const photoHtml = rereadPhotoSrc
+    ? `<img class="reread-photo" src="${rereadPhotoSrc.startsWith('data:') ? rereadPhotoSrc : escapeHtml(rereadPhotoSrc)}" alt="">`
     : '';
   const responsesHtml = responses.length > 0
     ? `<div class="reread-responses">
-        ${responses.map(r => `
-          <div class="reread-response">
+        ${responses.map(r => {
+          const from = r.from || 'teacher';
+          const fromLabel = from === 'teacher' ? 'けろ先生' : 'あなた';
+          return `
+          <div class="reread-response from-${from}">
+            <div class="reread-response-from">${fromLabel}</div>
             <div class="reread-response-body">${escapeHtml(r.body)}</div>
           </div>
-        `).join('')}
+          `;
+        }).join('')}
       </div>`
     : '';
   return `
@@ -1369,6 +1660,13 @@ async function migrateLegacyHandler() {
 
 document.getElementById('backBtn').addEventListener('click', () => navigate('home'));
 document.getElementById('settingsBtn').addEventListener('click', () => navigate('settings'));
+
+// ブラウザを閉じる時のクリーンアップ（presenceなど）
+window.addEventListener('beforeunload', () => {
+  if (state.cleanupHandlers) {
+    state.cleanupHandlers.forEach(fn => { try { fn(); } catch {} });
+  }
+});
 
 async function init() {
   if (mode === 'setup') {
