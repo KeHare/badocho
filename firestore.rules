@@ -1,0 +1,32 @@
+rules_version = '2';
+
+// バド帖 セキュリティルール
+//
+// 設計思想：
+// - URLトークンによるアクセス制御（ログイン認証なし）
+// - 教師トークン（teacher_index 配下）：48文字 hex（24バイト×2）
+// - 教え子トークン（students 配下）：32文字 hex（16バイト×2）
+// - トークンの推測難度がそのままセキュリティ強度になる
+// - トークンを知らない第三者は対象ドキュメントに到達できない
+//
+// 注意：
+// - apiKey はGitHub上に公開されるが、これはFirebaseの仕様で正常
+// - 実際のアクセス制御はこのルールで行う
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 教師の名簿ドキュメント（教え子トークン一覧の格納先）
+    // teacherToken は十分な長さ（48文字以上）を必須とし、推測攻撃を遮断
+    match /teacher_index/{teacherToken} {
+      allow read, write: if teacherToken.size() >= 48;
+    }
+
+    // 教え子ごとの投稿コレクション
+    // studentToken は十分な長さ（32文字以上）を必須とする
+    // 同じトークンを知っている教師・教え子の両方が読み書き可能
+    match /students/{studentToken}/{document=**} {
+      allow read, write: if studentToken.size() >= 32;
+    }
+  }
+}
