@@ -84,7 +84,7 @@ body {
   letter-spacing: 0.1em;
 }
 
-/* === 教え子セレクタ === */
+/* === 選手セレクタ === */
 .student-bar {
   display: flex;
   gap: 8px;
@@ -500,4 +500,359 @@ body {
   border-radius: 6px;
 }
 .qr-area.hidden { display: none; }
+
+.post-body.silent,
+.detail-body.silent {
+  color: var(--ink-soft);
+  font-style: italic;
+  font-size: 14px;
+}
+
+.draft-status {
+  font-size: 11px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+  min-height: 14px;
+}
+
+/* === あの日の便り === */
+.day-letter-card {
+  margin: 12px 14px 0;
+  padding: 14px 16px;
+  background: linear-gradient(to bottom, rgba(214, 198, 162, 0.18), rgba(214, 198, 162, 0.05));
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.day-letter-card:hover { background: rgba(214, 198, 162, 0.25); }
+.day-letter-label {
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.day-letter-body {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.day-letter-body .silent {
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.home-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+}
+.home-actions .compose-btn { flex: 1; margin: 0; }
+.reread-trigger {
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+/* === 読み返しモード（便箋の手触り） === */
+.reread-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.reread-student {
+  font-weight: 500;
+  font-size: 15px;
+}
+.reread-month-label {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.reread-month-select {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.reread-pages {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 24px 18px 0;
+}
+.reread-page {
+  margin: 0 0 36px;
+  padding: 0 0 28px;
+  border-bottom: 1px dashed var(--line);
+}
+.reread-page:last-of-type { border-bottom: none; }
+
+.reread-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.reread-date {
+  font-size: 13px;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+}
+
+.reread-body {
+  font-size: 16px;
+  line-height: 2;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reread-body.silent {
+  color: var(--ink-soft);
+  font-style: italic;
+  font-size: 14px;
+}
+.reread-photo {
+  display: block;
+  max-width: 100%;
+  margin: 16px 0;
+  border-radius: 6px;
+}
+
+.reread-responses {
+  margin-top: 18px;
+  padding-left: 16px;
+  border-left: 2px solid var(--accent-soft);
+}
+.reread-response {
+  margin-bottom: 14px;
+}
+.reread-response-body {
+  font-size: 15px;
+  line-height: 1.95;
+  color: var(--accent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-style: italic;
+}
+
+.reread-end {
+  text-align: center;
+  padding: 30px 14px 60px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  letter-spacing: 0.2em;
+}
+
+/* === アーカイブ === */
+body.archive-mode #header,
+body.archive-mode #footer { display: none; }
+body.archive-mode #main { padding: 0; }
+
+.archive-no-print {
+  max-width: 600px;
+  margin: 30px auto;
+  padding: 0 18px;
+}
+.archive-help {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+  font-size: 13px;
+  line-height: 1.85;
+}
+.archive-help h3 { margin: 0 0 10px; font-size: 16px; }
+.archive-help ol { margin: 0 0 14px; padding-left: 20px; }
+.archive-help li { margin-bottom: 4px; }
+
+.archive-cover {
+  max-width: 700px;
+  margin: 60px auto;
+  padding: 80px 40px;
+  text-align: center;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.archive-title {
+  font-size: 32px;
+  letter-spacing: 0.4em;
+  margin-bottom: 24px;
+  color: var(--ink);
+}
+.archive-subtitle {
+  font-size: 22px;
+  margin-bottom: 60px;
+  color: var(--ink);
+}
+.archive-period {
+  font-size: 14px;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+}
+.archive-stats {
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.archive-body {
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 0 40px;
+}
+.archive-page {
+  margin: 0 0 40px;
+  padding: 30px 0;
+  border-bottom: 1px solid var(--line);
+}
+.archive-page:last-child { border-bottom: none; }
+
+.archive-page-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.archive-date { font-weight: 500; letter-spacing: 0.04em; }
+.archive-cat { color: var(--accent); }
+
+.archive-post-body {
+  font-size: 15px;
+  line-height: 2;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 16px;
+}
+.archive-post-body.silent {
+  color: var(--ink-soft);
+  font-style: italic;
+}
+.archive-photo {
+  display: block;
+  max-width: 100%;
+  margin: 16px 0;
+  border-radius: 6px;
+}
+.archive-responses {
+  margin: 18px 0 0 24px;
+  padding: 12px 0 12px 16px;
+  border-left: 2px solid var(--accent-soft);
+}
+.archive-response {
+  font-size: 14px;
+  line-height: 1.95;
+  color: var(--accent);
+  font-style: italic;
+  white-space: pre-wrap;
+  margin-bottom: 12px;
+}
+.archive-response:last-child { margin-bottom: 0; }
+
+.archive-closing {
+  max-width: 600px;
+  margin: 80px auto;
+  padding: 60px 30px;
+  text-align: center;
+  font-size: 14px;
+  line-height: 2.4;
+  color: var(--ink-soft);
+}
+.archive-closing p { margin: 0 0 8px; }
+.archive-credit {
+  margin-top: 40px;
+  letter-spacing: 0.3em;
+  font-size: 12px;
+}
+
+/* === 楽屋（けろ先生ジャーナル） === */
+.journal-intro {
+  margin: 14px 18px;
+  padding: 14px 16px;
+  background: rgba(180, 160, 130, 0.08);
+  border-left: 3px solid var(--accent-soft);
+  font-size: 13px;
+  line-height: 1.85;
+  color: var(--ink-soft);
+  border-radius: 4px;
+}
+.journal-form {
+  margin: 14px 18px;
+  padding: 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.journal-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.journal-form-row .btn { margin-left: auto; }
+
+.journal-entries {
+  margin: 0 18px 60px;
+}
+.journal-entry {
+  margin: 16px 0;
+  padding: 14px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.journal-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  flex-wrap: wrap;
+}
+.journal-time { letter-spacing: 0.04em; }
+.journal-tag {
+  padding: 2px 8px;
+  background: var(--accent-soft);
+  color: var(--bg);
+  border-radius: 999px;
+  font-size: 11px;
+}
+.journal-body {
+  font-size: 14px;
+  line-height: 1.95;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+
+@media print {
+  @page { size: A4; margin: 18mm 16mm; }
+  body { background: white; color: black; font-size: 11pt; }
+  body.archive-mode .archive-no-print { display: none; }
+  body.archive-mode #header,
+  body.archive-mode #footer { display: none !important; }
+
+  .archive-cover {
+    margin: 0;
+    padding: 80mm 0 40mm;
+    border: none;
+    background: transparent;
+    page-break-after: always;
+  }
+  .archive-body { padding: 0; max-width: none; }
+  .archive-page {
+    page-break-inside: avoid;
+    padding: 16pt 0;
+  }
+  .archive-post-body { font-size: 11pt; line-height: 1.85; }
+  .archive-response { font-size: 10pt; line-height: 1.75; color: #555; }
+  .archive-closing { page-break-before: always; margin: 40mm 0 0; }
+}
 .hidden-input { display: none; }

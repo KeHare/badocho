@@ -47,12 +47,15 @@ const CAT_LABEL = Object.fromEntries(CATEGORIES.map(c => [c.id, c.label]));
 const params = new URLSearchParams(location.search);
 const teacherToken = (params.get('t') || '').trim();
 const studentToken = (params.get('s') || '').trim();
+const archiveStudentToken = (params.get('archive') || '').trim();
 
-const mode = teacherToken && teacherToken.length >= 32
-  ? 'teacher'
-  : studentToken && studentToken.length >= 20
-    ? 'student'
-    : 'setup';
+const mode = (teacherToken && teacherToken.length >= 32 && archiveStudentToken && archiveStudentToken.length >= 20)
+  ? 'archive'
+  : teacherToken && teacherToken.length >= 32
+    ? 'teacher'
+    : studentToken && studentToken.length >= 20
+      ? 'student'
+      : 'setup';
 
 let state = {
   view: 'home',
@@ -64,6 +67,9 @@ let state = {
   loading: true,
   error: null,
   filterMode: 'all', // 'all' | 'unanswered'
+  rereadMonth: 'all', // 'all' | 'YYYY-MM'
+  journal: [],
+  editingJournalId: null,
 };
 
 const subscriptions = new Map();
@@ -88,6 +94,19 @@ function fmtDate(iso) {
   const date = new Date(y, m - 1, d);
   const wk = ['日', '月', '火', '水', '木', '金', '土'][date.getDay()];
   return `${y}年${m}月${d}日（${wk}）`;
+}
+
+function fmtAgo(iso) {
+  if (!iso) return '少し前';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'いま';
+  if (mins < 60) return `${mins}分前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}時間前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}日前`;
+  return new Date(iso).toLocaleDateString('ja-JP');
 }
 
 function fmtTimestamp(isoFull) {
@@ -256,6 +275,83 @@ function unansweredCount(token) {
   return list.filter(p => !p.responses || p.responses.length === 0).length;
 }
 
+/* ====== コーチの地の文返し下書き（端末跨ぎ） ====== */
+
+function coachDraftRef(postId) {
+  return doc(db, 'coach_drafts', teacherToken, 'responses', postId);
+}
+
+async function loadCoachDraft(postId) {
+  if (mode !== 'teacher') return null;
+  try {
+    const snap = await getDoc(coachDraftRef(postId));
+    return snap.exists() ? snap.data() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveCoachDraft(postId, body) {
+  if (mode !== 'teacher') return;
+  try {
+    if (body && body.trim()) {
+      await setDoc(coachDraftRef(postId), {
+        body,
+        updatedAt: new Date().toISOString(),
+      });
+    } else {
+      await deleteDoc(coachDraftRef(postId)).catch(() => {});
+    }
+  } catch (err) {
+    console.warn('draft save failed', err);
+  }
+}
+
+async function clearCoachDraft(postId) {
+  if (mode !== 'teacher') return;
+  await deleteDoc(coachDraftRef(postId)).catch(() => {});
+}
+
+/* ====== コーチ専用ジャーナル（楽屋） ====== */
+
+function journalCol() {
+  return collection(db, 'coach_journal', teacherToken, 'entries');
+}
+
+function subscribeJournal() {
+  if (subscriptions.has('journal')) return;
+  const q = query(journalCol(), orderBy('createdAt', 'desc'));
+  const unsub = onSnapshot(q, snap => {
+    const list = [];
+    snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+    state.journal = list;
+    if (state.view === 'journal') render();
+  }, err => console.error('journal subscribe error', err));
+  subscriptions.set('journal', unsub);
+}
+
+async function addJournalEntry(body, attachedTo) {
+  const id = uid();
+  await setDoc(doc(journalCol(), id), {
+    body,
+    attachedTo: attachedTo || null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+async function updateJournalEntry(id, body, attachedTo) {
+  await setDoc(doc(journalCol(), id), {
+    body,
+    attachedTo: attachedTo || null,
+    updatedAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+async function deleteJournalEntry(id) {
+  await deleteDoc(doc(journalCol(), id));
+}
+
 async function appendResponse(token, postId, body) {
   const response = {
     id: uid(),
@@ -294,7 +390,7 @@ function render() {
   if (state.view === 'home') {
     back.classList.add('hidden');
     settings.classList.toggle('hidden', mode !== 'teacher');
-    title.textContent = mode === 'teacher' ? 'バド帖（教師）' : 'バド帖';
+    title.textContent = mode === 'teacher' ? 'バド帖（けろ先生）' : 'バド帖';
   } else {
     back.classList.remove('hidden');
     settings.classList.add('hidden');
@@ -302,7 +398,9 @@ function render() {
       compose: '投稿',
       detail: '投稿',
       settings: '設定',
-      students: '教え子',
+      students: '選手',
+      reread: '読み返し',
+      journal: '楽屋',
     })[state.view] || 'バド帖';
   }
 
@@ -310,6 +408,51 @@ function render() {
   else if (state.view === 'compose') renderCompose(main);
   else if (state.view === 'detail') renderDetail(main);
   else if (state.view === 'settings') renderSettings(main);
+  else if (state.view === 'reread') renderReread(main);
+  else if (state.view === 'journal') renderJournal(main);
+}
+
+function findOnThisDay(token) {
+  const all = state.postsByStudent[token] || [];
+  if (all.length === 0) return null;
+  const today = new Date();
+  const yyyy = today.getFullYear();
+  const monthDay = `-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  // 同月日の過去年の投稿
+  const sameDay = all.filter(p => p.date && p.date.endsWith(monthDay) && p.date.slice(0, 4) !== String(yyyy));
+  if (sameDay.length > 0) return { post: sameDay[0], reason: 'same-day' };
+  // 同月日がなければ ちょうど1ヶ月前 / 3ヶ月前 / 半年前 を探す
+  const milestones = [
+    { months: 1, label: '1ヶ月前のきょう' },
+    { months: 3, label: '3ヶ月前のきょう' },
+    { months: 6, label: '半年前のきょう' },
+    { months: 12, label: '1年前のきょう' },
+  ];
+  for (const ms of milestones) {
+    const target = new Date(yyyy, today.getMonth() - ms.months, today.getDate());
+    const targetStr = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
+    const m = all.find(p => p.date === targetStr);
+    if (m) return { post: m, reason: ms.label };
+  }
+  return null;
+}
+
+function renderOnThisDayCard(token) {
+  const found = findOnThisDay(token);
+  if (!found) return '';
+  const { post, reason } = found;
+  const label = reason === 'same-day'
+    ? `${post.date.slice(0, 4)}年のきょう、こう書いていました`
+    : `${reason}、こう書いていました`;
+  const bodyExcerpt = post.body
+    ? escapeHtml(post.body.length > 60 ? post.body.slice(0, 60) + '…' : post.body)
+    : '<span class="silent">（無言の便り）</span>';
+  return `
+    <div class="day-letter-card" data-post-id="${post.id}">
+      <div class="day-letter-label">${label}</div>
+      <div class="day-letter-body">${bodyExcerpt}</div>
+    </div>
+  `;
 }
 
 function renderSetup(root) {
@@ -320,15 +463,15 @@ function renderSetup(root) {
       <h2>はじめに</h2>
       <p>バド帖は、URLにトークンを付けて使います。</p>
       <ol>
-        <li><strong>渡部さん用URL</strong>を発行してください（このボタン）</li>
+        <li><strong>けろ先生用URL</strong>を発行してください（このボタン）</li>
         <li>そのURLをブックマーク</li>
-        <li>教え子用URLは「教え子追加」時に自動発行</li>
+        <li>選手用URLは「選手追加」時に自動発行</li>
       </ol>
-      <button class="btn btn-primary" id="genTeacherBtn">渡部さん用URLを発行する</button>
+      <button class="btn btn-primary" id="genTeacherBtn">けろ先生用URLを発行する</button>
       <div id="genTeacherResult" style="margin-top:16px"></div>
       ${hasLegacy ? `
         <hr style="margin:24px 0;border:none;border-top:1px solid #ddd">
-        <p class="small">※ この端末には旧バージョンのデータが残っています。渡部さん用URLを発行してログイン後、設定画面から移行できます。</p>
+        <p class="small">※ この端末には旧バージョンのデータが残っています。けろ先生用URLを発行してログイン後、設定画面から移行できます。</p>
       ` : ''}
     </div>
   `;
@@ -355,9 +498,9 @@ function renderHome(root) {
   if (mode === 'teacher' && state.students.length === 0) {
     root.innerHTML = `
       <div class="empty">
-        まだ教え子が登録されていません。<br>
+        まだ選手が登録されていません。<br>
         右上の <strong>⚙</strong> から追加してください。
-        <div class="small" style="margin-top:18px">蘆原より：「最初の一人を入れたら、まず断片を一つ。」</div>
+        <div class="small" style="margin-top:18px">最初の一人を入れたら、まず断片を一つ。</div>
       </div>
     `;
     return;
@@ -398,16 +541,29 @@ function renderHome(root) {
 
   const emptyMsg = state.filterMode === 'unanswered'
     ? `<div class="empty">未返しの投稿はありません。<br><span class="small">すべての断片に何かが返されている状態です。</span></div>`
-    : `<div class="empty">この教え子の記録はまだありません。<br><span class="small">「投稿する」から、断片のままで構いません。</span></div>`;
+    : `<div class="empty">この選手の記録はまだありません。<br><span class="small">「投稿する」から、断片のままで構いません。</span></div>`;
 
   const timeline = posts.length === 0
     ? emptyMsg
     : `<ul class="timeline">${posts.map(renderPostCard).join('')}</ul>`;
 
+  const dayLetter = state.activeStudentToken ? renderOnThisDayCard(state.activeStudentToken) : '';
+  const rereadBtn = state.activeStudentToken
+    ? `<button class="link-btn reread-trigger" id="rereadBtn">📖 読み返す</button>`
+    : '';
+  const journalBtn = mode === 'teacher'
+    ? `<button class="link-btn journal-trigger" id="journalBtn">🛋 楽屋へ</button>`
+    : '';
+
   root.innerHTML = `
     ${studentBar}
+    ${dayLetter}
     ${filterBar}
-    <button class="compose-btn" id="composeBtn">＋ 投稿する</button>
+    <div class="home-actions">
+      <button class="compose-btn" id="composeBtn">＋ 投稿する</button>
+      ${rereadBtn}
+      ${journalBtn}
+    </div>
     ${timeline}
   `;
 
@@ -417,6 +573,21 @@ function renderHome(root) {
       render();
     });
   });
+
+  const rereadBtnEl = document.getElementById('rereadBtn');
+  if (rereadBtnEl) {
+    rereadBtnEl.addEventListener('click', () => navigate('reread'));
+  }
+
+  const journalBtnEl = document.getElementById('journalBtn');
+  if (journalBtnEl) {
+    journalBtnEl.addEventListener('click', () => navigate('journal'));
+  }
+
+  const dayLetterEl = root.querySelector('.day-letter-card');
+  if (dayLetterEl) {
+    dayLetterEl.addEventListener('click', () => navigate('detail', { postId: dayLetterEl.dataset.postId }));
+  }
 
   root.querySelectorAll('.student-pill').forEach(el => {
     el.addEventListener('click', () => {
@@ -434,13 +605,16 @@ function renderPostCard(post) {
   const chips = (post.categories || []).map(c => `<span class="cat-chip ${c}">${CAT_LABEL[c] || c}</span>`).join(' ');
   const respCount = (post.responses || []).length;
   const respLine = respCount > 0 ? `地の文返し ${respCount}件` : '返しはまだ';
+  const bodyHtml = post.body
+    ? `<div class="post-body">${escapeHtml(post.body)}</div>`
+    : `<div class="post-body silent">（無言の便り）</div>`;
   return `
     <li class="post-card" data-post-id="${post.id}">
       <div class="post-meta">
         <span class="post-date">${fmtDate(post.date)}</span>
         ${chips}
       </div>
-      <div class="post-body">${escapeHtml(post.body)}</div>
+      ${bodyHtml}
       <div class="post-foot">${respLine}</div>
     </li>
   `;
@@ -453,7 +627,7 @@ function renderCompose(root) {
 
   root.innerHTML = `
     <div class="form-group">
-      <label class="form-label">教え子</label>
+      <label class="form-label">選手</label>
       <div style="font-size:15px;">${escapeHtml(studentName)}</div>
     </div>
     <div class="form-group">
@@ -467,8 +641,8 @@ function renderCompose(root) {
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label" for="bodyInput">本文（断片のままでOK）</label>
-      <textarea class="form-textarea" id="bodyInput" placeholder="今日のひと言・気になったこと・うまくいかなかった一場面…"></textarea>
+      <label class="form-label" for="bodyInput">本文（書かなくてもOK）</label>
+      <textarea class="form-textarea" id="bodyInput" placeholder="今日のひと言・気になったこと・うまくいかなかった一場面…&#10;（何も書かずに「いた印」だけ残してもいい）"></textarea>
     </div>
     <div class="form-group">
       <label class="form-label" for="photoInput">写真URL（任意）</label>
@@ -495,13 +669,10 @@ function renderCompose(root) {
     const date = document.getElementById('dateInput').value || todayISO();
     const body = document.getElementById('bodyInput').value.trim();
     const photoUrl = document.getElementById('photoInput').value.trim();
-    if (!body && !photoUrl) {
-      alert('本文か写真URLのいずれかを入力してください。');
-      return;
-    }
+    // 無言ポスト許容：何もなくても投稿成立。日付・カテゴリだけの「いた印」も断片の最小単位
     const targetToken = mode === 'student' ? studentToken : state.activeStudentToken;
     if (!targetToken) {
-      alert('対象の教え子が選ばれていません。');
+      alert('対象の選手が選ばれていません。');
       return;
     }
 
@@ -572,11 +743,12 @@ function renderDetail(root) {
         </div>
       `).join('');
 
-  // 教え子モードでは「返し」入力欄を表示しない（読み専用）
+  // 選手モードでは「返し」入力欄を表示しない（読み専用）
   const responseFormHtml = mode === 'teacher' ? `
       <div class="response-form">
         <p class="hint">採点や指示ではなく、情景・観察・例えで。</p>
         <textarea class="form-textarea short" id="responseInput" placeholder="その日のコートに見えた風景を、地の文で。"></textarea>
+        <div class="draft-status" id="draftStatus"></div>
         <button class="btn btn-primary" id="addResponseBtn" style="margin-top:8px">返しを記す</button>
       </div>
   ` : '';
@@ -587,13 +759,17 @@ function renderDetail(root) {
     </div>
   ` : '';
 
+  const detailBodyHtml = post.body
+    ? `<div class="detail-body">${escapeHtml(post.body)}</div>`
+    : `<div class="detail-body silent">（無言の便り）</div>`;
+
   root.innerHTML = `
     <article class="detail-post">
       <div class="post-meta">
         <span class="post-date">${fmtDate(post.date)}</span>
         ${chips}
       </div>
-      <div class="detail-body">${escapeHtml(post.body)}</div>
+      ${detailBodyHtml}
       ${photoBlock}
     </article>
 
@@ -607,15 +783,39 @@ function renderDetail(root) {
   `;
 
   if (mode === 'teacher') {
+    const ta = document.getElementById('responseInput');
+    const status = document.getElementById('draftStatus');
+
+    // 下書きの読み込み（別端末で書きかけた続きをここで再開）
+    loadCoachDraft(post.id).then(draft => {
+      if (draft && ta && ta.value === '') {
+        ta.value = draft.body;
+        const ago = fmtAgo(draft.updatedAt);
+        status.textContent = `（${ago}の下書きを読み込みました）`;
+      }
+    });
+
+    // タイピング1.5秒静止で自動保存
+    let draftTimer;
+    ta.addEventListener('input', () => {
+      clearTimeout(draftTimer);
+      status.textContent = '入力中…';
+      draftTimer = setTimeout(async () => {
+        await saveCoachDraft(post.id, ta.value);
+        status.textContent = ta.value.trim() ? '下書きを保存しました' : '';
+      }, 1500);
+    });
+
     document.getElementById('addResponseBtn').addEventListener('click', async () => {
-      const ta = document.getElementById('responseInput');
       const body = ta.value.trim();
       if (!body) return;
       const btn = document.getElementById('addResponseBtn');
       btn.disabled = true;
       try {
         await appendResponse(targetToken, post.id, body);
+        await clearCoachDraft(post.id);
         ta.value = '';
+        status.textContent = '';
       } catch (err) {
         alert('返しの保存に失敗しました：' + err.message);
       } finally {
@@ -635,9 +835,271 @@ function renderDetail(root) {
   }
 }
 
+function renderJournal(root) {
+  if (mode !== 'teacher') {
+    root.innerHTML = `<div class="empty">この画面はけろ先生専用です。</div>`;
+    return;
+  }
+
+  const studentOptions = `
+    <option value="">紐付けない</option>
+    ${state.students.map(s => `<option value="${s.token}">${escapeHtml(s.name)}</option>`).join('')}
+  `;
+
+  const entries = state.journal || [];
+  const entriesHtml = entries.length === 0
+    ? `<div class="empty">まだ何も書かれていません。<br><span class="small">楽屋は誰にも見えない、けろ先生だけの場所です。</span></div>`
+    : entries.map(e => {
+        const linked = e.attachedTo ? state.students.find(s => s.token === e.attachedTo)?.name : null;
+        const linkedTag = linked ? `<span class="journal-tag">${escapeHtml(linked)}</span>` : '';
+        return `
+          <article class="journal-entry" data-entry-id="${e.id}">
+            <header class="journal-entry-head">
+              <time class="journal-time">${fmtAgo(e.createdAt)}</time>
+              ${linkedTag}
+              <button class="link-btn" data-action="edit-entry">編集</button>
+              <button class="link-btn" data-action="delete-entry">削除</button>
+            </header>
+            <div class="journal-body">${escapeHtml(e.body)}</div>
+          </article>
+        `;
+      }).join('');
+
+  root.innerHTML = `
+    <div class="journal-intro">
+      ここはけろ先生だけの楽屋。<br>
+      選手には見えない、地の文返しを練る前のメモ・観察・独白を置いておく場所です。
+    </div>
+
+    <section class="journal-form">
+      <textarea class="form-textarea" id="journalInput" placeholder="今日のあの子のこと、コートで気になった一場面、地の文返しのラフ…"></textarea>
+      <div class="journal-form-row">
+        <label class="form-label" style="font-size:12px;margin:0">紐付け先（任意）：</label>
+        <select id="journalAttach" class="reread-month-select">${studentOptions}</select>
+        <button class="btn btn-primary" id="addJournalBtn">書き留める</button>
+      </div>
+    </section>
+
+    <div class="journal-entries">
+      ${entriesHtml}
+    </div>
+  `;
+
+  document.getElementById('addJournalBtn').addEventListener('click', async () => {
+    const ta = document.getElementById('journalInput');
+    const attached = document.getElementById('journalAttach').value;
+    const body = ta.value.trim();
+    if (!body) return;
+    const btn = document.getElementById('addJournalBtn');
+    btn.disabled = true;
+    try {
+      await addJournalEntry(body, attached);
+      ta.value = '';
+      document.getElementById('journalAttach').value = '';
+    } catch (err) {
+      alert('保存に失敗しました：' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  root.querySelectorAll('.journal-entry').forEach(el => {
+    const id = el.dataset.entryId;
+    el.querySelector('[data-action="edit-entry"]').addEventListener('click', async () => {
+      const cur = state.journal.find(e => e.id === id);
+      const newBody = prompt('編集（地の文を整える）', cur.body);
+      if (newBody !== null && newBody.trim() !== cur.body) {
+        try {
+          await updateJournalEntry(id, newBody.trim(), cur.attachedTo);
+        } catch (err) {
+          alert('更新に失敗しました：' + err.message);
+        }
+      }
+    });
+    el.querySelector('[data-action="delete-entry"]').addEventListener('click', async () => {
+      if (!confirm('この一筆を削除しますか？（取り消せません）')) return;
+      try {
+        await deleteJournalEntry(id);
+      } catch (err) {
+        alert('削除に失敗しました：' + err.message);
+      }
+    });
+  });
+}
+
+function renderArchive() {
+  const back = document.getElementById('backBtn');
+  const settings = document.getElementById('settingsBtn');
+  const title = document.getElementById('headerTitle');
+  back.classList.add('hidden');
+  settings.classList.add('hidden');
+  title.textContent = 'バド帖 アーカイブ';
+
+  document.body.classList.add('archive-mode');
+
+  const tk = archiveStudentToken;
+  const student = state.students.find(s => s.token === tk);
+  const studentName = student ? student.name : '名前不明';
+  const posts = (state.postsByStudent[tk] || []).slice().sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt < b.createdAt ? -1 : 1)
+  );
+  const responseCount = posts.reduce((sum, p) => sum + (p.responses?.length || 0), 0);
+
+  const dateRange = posts.length > 0
+    ? `${fmtDate(posts[0].date)} 〜 ${fmtDate(posts[posts.length - 1].date)}`
+    : '記録なし';
+
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <div class="archive-no-print">
+      <div class="archive-help">
+        <h3>このページをPDFで保存</h3>
+        <ol>
+          <li>キーボードで <strong>Cmd + P</strong>（Macなら）</li>
+          <li>「送信先」または「保存先」で <strong>PDFに保存</strong> を選ぶ</li>
+          <li>「余白：なし」または「最小」を推奨</li>
+          <li>「背景のグラフィック」をオンにすると見栄え良し</li>
+          <li>保存先・ファイル名（例：${studentName}_バド帖アーカイブ.pdf）を選んで完了</li>
+        </ol>
+        <button class="btn btn-primary" onclick="window.print()">印刷ダイアログを開く</button>
+      </div>
+    </div>
+
+    <article class="archive-cover">
+      <div class="archive-title">バド帖</div>
+      <div class="archive-subtitle">${escapeHtml(studentName)} の記録</div>
+      <div class="archive-period">${dateRange}</div>
+      <div class="archive-stats">全${posts.length}投稿　地の文返し${responseCount}件</div>
+    </article>
+
+    <div class="archive-body">
+      ${posts.length === 0 ? '<div class="empty">投稿がありません。</div>' : posts.map(renderArchivePage).join('')}
+    </div>
+
+    <article class="archive-closing">
+      <p>—— ここに書かれているのは、断片です。</p>
+      <p>整える前の言葉と、それに連なる地の文。</p>
+      <p>歩んだ日々が、すこしでも誰かの何かの力になりますように。</p>
+      <div class="archive-credit">バド帖</div>
+    </article>
+  `;
+}
+
+function renderArchivePage(post) {
+  const responses = (post.responses || []).slice().sort((a, b) => a.createdAt < b.createdAt ? -1 : 1);
+  const chips = (post.categories || []).map(c => `${CAT_LABEL[c] || c}`).join('・');
+  const bodyHtml = post.body
+    ? `<div class="archive-post-body">${escapeHtml(post.body)}</div>`
+    : `<div class="archive-post-body silent">（無言の便り）</div>`;
+  const photoHtml = post.photoUrl
+    ? `<img class="archive-photo" src="${escapeHtml(post.photoUrl)}" alt="">`
+    : '';
+  const responsesHtml = responses.length > 0
+    ? `<div class="archive-responses">
+        ${responses.map(r => `<div class="archive-response">${escapeHtml(r.body)}</div>`).join('')}
+      </div>`
+    : '';
+  return `
+    <article class="archive-page">
+      <header class="archive-page-head">
+        <span class="archive-date">${fmtDate(post.date)}</span>
+        ${chips ? `<span class="archive-cat">${escapeHtml(chips)}</span>` : ''}
+      </header>
+      ${bodyHtml}
+      ${photoHtml}
+      ${responsesHtml}
+    </article>
+  `;
+}
+
+function renderReread(root) {
+  const tk = mode === 'student' ? studentToken : state.activeStudentToken;
+  if (!tk) {
+    navigate('home');
+    return;
+  }
+
+  const all = (state.postsByStudent[tk] || []).slice().sort((a, b) =>
+    a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt < b.createdAt ? -1 : 1)
+  );
+
+  if (all.length === 0) {
+    root.innerHTML = `<div class="empty">読み返す断片はまだありません。</div>`;
+    return;
+  }
+
+  // 月別グループ
+  const months = [...new Set(all.map(p => p.date.slice(0, 7)))].sort();
+  const monthLabel = m => `${m.slice(0, 4)}年${parseInt(m.slice(5, 7), 10)}月`;
+
+  const monthFilter = state.rereadMonth || 'all';
+  const filtered = monthFilter === 'all' ? all : all.filter(p => p.date.startsWith(monthFilter));
+
+  const studentName = mode === 'teacher'
+    ? (state.students.find(s => s.token === tk)?.name || '')
+    : '';
+
+  root.innerHTML = `
+    <div class="reread-controls">
+      ${studentName ? `<div class="reread-student">${escapeHtml(studentName)}</div>` : ''}
+      <label class="reread-month-label">期間：
+        <select id="rereadMonthSelect" class="reread-month-select">
+          <option value="all" ${monthFilter === 'all' ? 'selected' : ''}>全部（${all.length}件）</option>
+          ${months.map(m => {
+            const cnt = all.filter(p => p.date.startsWith(m)).length;
+            return `<option value="${m}" ${monthFilter === m ? 'selected' : ''}>${monthLabel(m)}（${cnt}件）</option>`;
+          }).join('')}
+        </select>
+      </label>
+    </div>
+
+    <div class="reread-pages">
+      ${filtered.map(renderRereadPage).join('')}
+    </div>
+
+    <div class="reread-end">— ここまで —</div>
+  `;
+
+  document.getElementById('rereadMonthSelect').addEventListener('change', e => {
+    state.rereadMonth = e.target.value;
+    render();
+  });
+}
+
+function renderRereadPage(post) {
+  const responses = (post.responses || []).slice().sort((a, b) => a.createdAt < b.createdAt ? -1 : 1);
+  const chips = (post.categories || []).map(c => `<span class="cat-chip ${c}">${CAT_LABEL[c] || c}</span>`).join(' ');
+  const bodyHtml = post.body
+    ? `<div class="reread-body">${escapeHtml(post.body)}</div>`
+    : `<div class="reread-body silent">（無言の便り）</div>`;
+  const photoHtml = post.photoUrl
+    ? `<img class="reread-photo" src="${escapeHtml(post.photoUrl)}" alt="">`
+    : '';
+  const responsesHtml = responses.length > 0
+    ? `<div class="reread-responses">
+        ${responses.map(r => `
+          <div class="reread-response">
+            <div class="reread-response-body">${escapeHtml(r.body)}</div>
+          </div>
+        `).join('')}
+      </div>`
+    : '';
+  return `
+    <article class="reread-page">
+      <header class="reread-head">
+        <span class="reread-date">${fmtDate(post.date)}</span>
+        ${chips}
+      </header>
+      ${bodyHtml}
+      ${photoHtml}
+      ${responsesHtml}
+    </article>
+  `;
+}
+
 function renderSettings(root) {
   if (mode !== 'teacher') {
-    root.innerHTML = `<div class="empty">この画面は渡部さん専用です。</div>`;
+    root.innerHTML = `<div class="empty">この画面はけろ先生専用です。</div>`;
     return;
   }
 
@@ -653,6 +1115,7 @@ function renderSettings(root) {
             <div class="row-actions-inline">
               <button class="link-btn" data-action="copy">URLをコピー</button>
               <button class="link-btn" data-action="qr">QRを表示</button>
+              <button class="link-btn" data-action="archive">アーカイブを開く</button>
               <button class="link-btn" data-action="regen">URL再発行</button>
             </div>
             <div class="qr-area hidden" data-qr></div>
@@ -677,14 +1140,14 @@ function renderSettings(root) {
 
   root.innerHTML = `
     <section class="settings-section">
-      <h2>教え子</h2>
+      <h2>選手</h2>
       <div id="studentList">${studentRows}</div>
       <div class="add-student-form">
         <input type="text" id="newStudentName" placeholder="名前を追加" maxlength="40">
         <button id="addStudentBtn">追加</button>
       </div>
       <p style="font-size:12px;color:var(--ink-soft);margin-top:8px;line-height:1.7">
-        追加すると、その教え子専用のURLが発行されます。LINEなどで本人に送ってください。
+        追加すると、その選手専用のURLが発行されます。LINEなどで本人に送ってください。
       </p>
     </section>
 
@@ -693,7 +1156,7 @@ function renderSettings(root) {
     <section class="settings-section">
       <h2>このツールについて</h2>
       <p style="font-size:13px;color:var(--ink-soft);margin:0;line-height:1.85">
-        バド帖は、教え子の断片メモを蓄積し、渡部さんが地の文で返すための記録器です。<br>
+        バド帖は、選手の断片メモを蓄積し、けろ先生が地の文で返すための記録器です。<br>
         整える前の言葉を、そのまま投げ込んでください。
       </p>
     </section>
@@ -754,10 +1217,15 @@ function renderSettings(root) {
       area.innerHTML = '<div class="small">生成中…</div>';
       try {
         const dataUrl = await QRCode.toDataURL(url, { width: 240, margin: 1, color: { dark: '#2b2a26', light: '#ffffff' } });
-        area.innerHTML = `<img src="${dataUrl}" alt="QRコード" style="display:block;margin:8px auto;border:1px solid var(--line);border-radius:6px"><div class="small" style="text-align:center">教え子のスマホでスキャン</div>`;
+        area.innerHTML = `<img src="${dataUrl}" alt="QRコード" style="display:block;margin:8px auto;border:1px solid var(--line);border-radius:6px"><div class="small" style="text-align:center">選手のスマホでスキャン</div>`;
       } catch (err) {
         area.innerHTML = `<div class="small" style="color:var(--warn)">QR生成失敗：${escapeHtml(err.message)}</div>`;
       }
+    });
+
+    row.querySelector('[data-action="archive"]').addEventListener('click', () => {
+      const archiveUrl = `${location.origin}${location.pathname}?t=${teacherToken}&archive=${token}`;
+      window.open(archiveUrl, '_blank');
     });
 
     row.querySelector('[data-action="regen"]').addEventListener('click', async () => {
@@ -807,7 +1275,7 @@ async function migrateLegacyHandler() {
     alert('旧データの読み込みに失敗しました。');
     return;
   }
-  if (!confirm(`旧データを移行します：\n・教え子 ${legacy.students?.length || 0}人\n・投稿 ${legacy.posts?.length || 0}件\n\nよろしいですか？`)) return;
+  if (!confirm(`旧データを移行します：\n・選手 ${legacy.students?.length || 0}人\n・投稿 ${legacy.posts?.length || 0}件\n\nよろしいですか？`)) return;
 
   const result = document.getElementById('migrateResult');
   result.textContent = '移行中…';
@@ -834,7 +1302,7 @@ async function migrateLegacyHandler() {
       });
       postsAdded++;
     }
-    result.innerHTML = `<span style="color:green">✓ 移行完了：教え子 ${added}人 / 投稿 ${postsAdded}件</span>`;
+    result.innerHTML = `<span style="color:green">✓ 移行完了：選手 ${added}人 / 投稿 ${postsAdded}件</span>`;
   } catch (err) {
     result.innerHTML = `<span style="color:red">移行中にエラー：${escapeHtml(err.message)}</span>`;
   }
@@ -852,11 +1320,34 @@ async function init() {
     return;
   }
 
+  if (mode === 'archive') {
+    try {
+      // 名簿から名前取得
+      await loadTeacherIndex();
+      // 投稿を一度だけ取得（購読しない）
+      const snap = await getDocs(query(
+        collection(db, 'students', archiveStudentToken, 'posts'),
+        orderBy('date', 'asc')
+      ));
+      const posts = [];
+      snap.forEach(d => posts.push({ id: d.id, ...d.data() }));
+      state.postsByStudent[archiveStudentToken] = posts;
+      state.activeStudentToken = archiveStudentToken;
+      state.loading = false;
+      renderArchive();
+      return;
+    } catch (err) {
+      document.getElementById('main').innerHTML = `<div class="empty">アーカイブの読み込みに失敗しました：${escapeHtml(err.message)}</div>`;
+      return;
+    }
+  }
+
   try {
     if (mode === 'teacher') {
       await loadTeacherIndex();
       subscribeTeacherIndex();
       state.students.forEach(s => subscribeStudentPosts(s.token));
+      subscribeJournal();
     } else if (mode === 'student') {
       subscribeStudentPosts(studentToken);
       state.activeStudentToken = studentToken;
