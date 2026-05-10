@@ -2,7 +2,7 @@
 // 役割：オフライン時の起動と静的アセットのキャッシュ
 // Firestoreデータはキャッシュせず常にネットワークから取得
 
-const CACHE_VERSION = 'badcho-v2';
+const CACHE_VERSION = 'badcho-v3';
 const PRECACHE_ASSETS = [
   './manifest.webmanifest',
   './icon-192.png',
@@ -28,6 +28,11 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
+
+  // http/https以外（chrome-extension, data, blob等）は触らない
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return;
+  }
 
   // Firestore / Firebase / 外部CDNは常にネットワーク（キャッシュしない）
   if (url.hostname.includes('firestore.googleapis.com') ||
