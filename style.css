@@ -558,6 +558,22 @@ body {
   font-size: 12px;
   color: var(--ink-soft);
 }
+.setup-card .warn-note {
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--warn);
+  background: rgba(166, 74, 46, 0.06);
+  border-left: 3px solid var(--warn);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+/* おかえりカード（前回の帳面へ戻る導線） */
+.setup-card.recall-card {
+  border-color: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow);
+  background: linear-gradient(to bottom, #fbf5e6, var(--bg-card));
+}
 
 .pill-badge {
   display: inline-block;
@@ -978,3 +994,149 @@ body.archive-mode #main { padding: 0; }
   .archive-closing { page-break-before: always; margin: 40mm 0 0; }
 }
 .hidden-input { display: none; }
+
+/* ===================================================================
+   追加機能：お題 / 届いた印 / 受け取りのしるべ / スマホ最適化
+   =================================================================== */
+
+/* --- スマホ最適化（タップ感・誤ズーム抑制） --- */
+* { -webkit-tap-highlight-color: transparent; }
+button, .post-card, .prompt-card, .student-pill { touch-action: manipulation; }
+.post-body, .detail-body, .prompt-card-body, .compose-prompt-quote-body,
+.prompt-entry-body, .response-item .body { overflow-wrap: anywhere; }
+
+/* --- 届いた印（選手ホームの未読バッジ） --- */
+.post-card.has-unread {
+  border-color: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-soft), var(--shadow);
+}
+.post-foot .unread-dot {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+.post-foot .unread-dot::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+}
+
+/* --- 選手ホームのお題カード（受信箱） --- */
+.prompt-inbox {
+  margin: 12px 14px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.prompt-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  background: linear-gradient(to bottom, #fbf5e6, #fffcf5);
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius);
+  cursor: pointer;
+  box-shadow: var(--shadow);
+}
+.prompt-card:active { background: #f7eed8; }
+.prompt-card-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+.prompt-card-body {
+  font-size: 16px;
+  line-height: 1.7;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+.prompt-card-cta {
+  font-size: 12px;
+  color: var(--accent);
+  align-self: flex-end;
+}
+
+/* --- compose上部のお題引用 --- */
+.compose-prompt-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  background: #fbf5e6;
+  border-left: 3px solid var(--accent-soft);
+  border-radius: 0 8px 8px 0;
+}
+.compose-prompt-quote-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+.compose-prompt-quote-body {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--ink);
+  white-space: pre-wrap;
+}
+
+/* --- 受け取りのしるべ（けろ先生の詳細画面） --- */
+.receipt {
+  margin-top: 8px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+}
+.receipt.read { color: var(--accent); }
+.receipt.unread { color: var(--ink-soft); font-style: italic; opacity: 0.8; }
+
+/* --- お題画面（けろ先生） --- */
+.prompt-intro {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 14px;
+  line-height: 1.8;
+}
+.prompt-intro .small { display: block; margin-top: 6px; color: var(--ink-soft); font-size: 12px; line-height: 1.7; }
+.prompt-form { margin-bottom: 20px; }
+.prompt-list { display: flex; flex-direction: column; gap: 12px; }
+.prompt-entry {
+  padding: 14px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.prompt-entry.is-answered { opacity: 0.85; }
+.prompt-entry-body {
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  margin-bottom: 10px;
+}
+.prompt-entry-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.prompt-status { font-size: 12px; }
+.prompt-status.answered { color: var(--accent); }
+.prompt-status.open { color: var(--ink-soft); font-style: italic; }
+.prompt-entry-actions { display: inline-flex; gap: 14px; }
+.prompt-trigger { white-space: nowrap; font-size: 13px; }

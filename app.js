@@ -32,6 +32,17 @@ const db = getFirestore(app);
 
 const STORAGE_KEY = 'badcho.v2';
 const LEGACY_STORAGE_KEY = 'badcho.v1';
+const TEACHER_URL_KEY = 'badcho.teacherUrl'; // この端末が前回使ったけろ先生用URL（迷子防止）
+
+function rememberTeacherUrl(url) {
+  try { localStorage.setItem(TEACHER_URL_KEY, url); } catch {}
+}
+function recalledTeacherUrl() {
+  try { return localStorage.getItem(TEACHER_URL_KEY) || ''; } catch { return ''; }
+}
+function forgetTeacherUrl() {
+  try { localStorage.removeItem(TEACHER_URL_KEY); } catch {}
+}
 
 const CATEGORIES = [
   { id: 'match', label: '試合' },
@@ -99,10 +110,18 @@ let state = {
   journal: [],
   editingJournalId: null,
   editingPostId: null,
+  promptsByStudent: {}, // token -> お題[]
+  answeringPromptId: null, // compose時に答えるお題のid
   cleanupHandlers: [],
 };
 
 const subscriptions = new Map();
+
+// けろ先生のpresence（「いま読んでいる」）を多重起動させないためのガード。
+// renderDetailは投稿スナップショットの度に呼ばれるため、presence送信を
+// レンダー毎にやると「書き込み→再レンダー→書き込み」の無限ループになる。
+// これで「投稿を開くたび1回だけ」初期化する。
+let presencePostId = null;
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -181,8 +200,12 @@ function navigate(view, opts = {}) {
   if ('postId' in opts) state.activePostId = opts.postId;
   if ('studentToken' in opts) state.activeStudentToken = opts.studentToken;
   if ('editingPostId' in opts) state.editingPostId = opts.editingPostId;
+  if ('answeringPromptId' in opts) state.answeringPromptId = opts.answeringPromptId;
   // home に戻る時は編集状態をリセット
-  if (view === 'home') state.editingPostId = null;
+  if (view === 'home') {
+    state.editingPostId = null;
+    state.answeringPromptId = null;
+  }
   render();
   window.scrollTo(0, 0);
 }
@@ -223,7 +246,10 @@ function subscribeTeacherIndex() {
     if (snap.exists()) {
       state.students = snap.data().students || [];
       render();
-      state.students.forEach(s => subscribeStudentPosts(s.token));
+      state.students.forEach(s => {
+        subscribeStudentPosts(s.token);
+        subscribeStudentPrompts(s.token);
+      });
     }
   }, err => {
     console.error('teacher_index subscribe error', err);
@@ -377,6 +403,74 @@ function unansweredCount(token) {
   return list.filter(p => !p.responses || p.responses.length === 0).length;
 }
 
+/* ====== お題（けろ先生 → 選手への問い） ====== */
+
+function promptsCol(token) {
+  return collection(db, 'students', token, 'prompts');
+}
+
+function subscribeStudentPrompts(token) {
+  if (subscriptions.has('prompts:' + token)) return;
+  const q = query(promptsCol(token), orderBy('createdAt', 'desc'));
+  const unsub = onSnapshot(q, snap => {
+    const list = [];
+    snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+    state.promptsByStudent[token] = list;
+    render();
+  }, err => console.error('prompts subscribe error', token, err));
+  subscriptions.set('prompts:' + token, unsub);
+}
+
+async function addPrompt(token, body) {
+  const id = uid();
+  await setDoc(doc(promptsCol(token), id), {
+    body: body.trim(),
+    status: 'open',
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function deletePrompt(token, promptId) {
+  await deleteDoc(doc(promptsCol(token), promptId));
+}
+
+async function markPromptAnswered(token, promptId, postId) {
+  await setDoc(doc(promptsCol(token), promptId), {
+    status: 'answered',
+    answeredPostId: postId,
+    answeredAt: new Date().toISOString(),
+  }, { merge: true });
+}
+
+function openPromptsFor(token) {
+  return (state.promptsByStudent[token] || []).filter(p => p.status !== 'answered');
+}
+
+/* ====== 既読（選手 → けろ先生への「受け取りのしるべ」） ====== */
+
+// その投稿に付いた、けろ先生の地の文返しのうち最新の時刻
+function latestTeacherResponseAt(post) {
+  const list = (post.responses || []).filter(r => (r.from || 'teacher') === 'teacher');
+  if (list.length === 0) return null;
+  return list.reduce((mx, r) => (r.createdAt > mx ? r.createdAt : mx), '');
+}
+
+// 選手がまだ受け取っていない地の文返しがあるか
+function hasUnreadTeacherResponse(post) {
+  const latest = latestTeacherResponseAt(post);
+  if (!latest) return false;
+  return !post.studentReadAt || post.studentReadAt < latest;
+}
+
+// 選手が地の文返しを読んだしるべを残す（採点ではなく受領）
+async function markPostRead(token, postId) {
+  try {
+    await updateDoc(postRef(token, postId), { studentReadAt: new Date().toISOString() });
+  } catch (err) {
+    console.warn('markPostRead failed', err);
+  }
+}
+
 /* ====== コーチの地の文返し下書き（端末跨ぎ） ====== */
 
 function coachDraftRef(postId) {
@@ -523,6 +617,7 @@ function render() {
       students: '選手',
       reread: '読み返し',
       journal: '楽屋',
+      prompt: 'お題',
     })[state.view] || 'バド帖';
   }
 
@@ -532,6 +627,7 @@ function render() {
   else if (state.view === 'settings') renderSettings(main);
   else if (state.view === 'reread') renderReread(main);
   else if (state.view === 'journal') renderJournal(main);
+  else if (state.view === 'prompt') renderPrompt(main);
 }
 
 function findOnThisDay(token) {
@@ -580,16 +676,38 @@ function renderOnThisDayCard(token) {
 function renderSetup(root) {
   const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
   const hasLegacy = !!legacy;
+  const recalled = recalledTeacherUrl();
+
+  // この端末で前に使ったけろ先生用URLがあれば、最優先で「おかえり」を出す（迷子防止）
+  const recallHtml = recalled ? `
+    <div class="setup-card recall-card">
+      <h2>おかえりなさい</h2>
+      <p>この端末で前に使った、<strong>あなたの帳面</strong>のURLが見つかりました。<br>
+      新しく作り直すと別の空の帳面になります。<strong>続きはこちらから開いてください。</strong></p>
+      <a class="btn btn-primary" href="${escapeHtml(recalled)}" style="display:block;text-decoration:none;text-align:center">前回の帳面（けろ先生用URL）を開く</a>
+      <textarea readonly class="form-textarea short" style="font-size:12px;margin-top:10px">${escapeHtml(recalled)}</textarea>
+      <button class="link-btn" id="forgetTeacherBtn" style="margin-top:8px">このURLの記憶を消す</button>
+    </div>
+  ` : '';
+
+  // 発行カード：記憶がある時は「別の新しい帳面を作る」と明示して格下げ
+  const issueTitle = recalled ? '新しく別の帳面を作る' : 'はじめに';
+  const issueNote = recalled
+    ? `<p class="warn-note">⚠ これは<strong>前回とは別の、空っぽの新しい帳面</strong>になります。けろ先生用URLを増やすほど迷子になりやすいので、ふつうは上の「前回の帳面を開く」を使ってください。</p>`
+    : `<p>バド帖は、URLにトークンを付けて使います。発行したURL自体が<strong>あなたの帳面そのもの（ログイン代わり）</strong>です。</p>
+       <ol>
+         <li><strong>けろ先生用URL</strong>を発行（最初の1回だけ）</li>
+         <li>そのURLを<strong>必ずブックマーク</strong>。以後はそこから開く</li>
+         <li>選手用URLは「選手追加」時に自動発行</li>
+       </ol>
+       <p class="warn-note">⚠ 発行ボタンを押すたびに<strong>別の空の帳面</strong>ができます。何度も押さないでください。</p>`;
+
   root.innerHTML = `
+    ${recallHtml}
     <div class="setup-card">
-      <h2>はじめに</h2>
-      <p>バド帖は、URLにトークンを付けて使います。</p>
-      <ol>
-        <li><strong>けろ先生用URL</strong>を発行してください（このボタン）</li>
-        <li>そのURLをブックマーク</li>
-        <li>選手用URLは「選手追加」時に自動発行</li>
-      </ol>
-      <button class="btn btn-primary" id="genTeacherBtn">けろ先生用URLを発行する</button>
+      <h2>${issueTitle}</h2>
+      ${issueNote}
+      <button class="btn ${recalled ? 'btn-secondary' : 'btn-primary'}" id="genTeacherBtn">けろ先生用URLを発行する</button>
       <div id="genTeacherResult" style="margin-top:16px"></div>
       ${hasLegacy ? `
         <hr style="margin:24px 0;border:none;border-top:1px solid #ddd">
@@ -597,13 +715,26 @@ function renderSetup(root) {
       ` : ''}
     </div>
   `;
+
+  const forgetBtn = document.getElementById('forgetTeacherBtn');
+  if (forgetBtn) {
+    forgetBtn.addEventListener('click', () => {
+      if (!confirm('この端末からけろ先生用URLの記憶を消します。\nURL自体は無効になりません（ブックマークが別にあれば使えます）。よろしいですか？')) return;
+      forgetTeacherUrl();
+      render();
+    });
+  }
+
   document.getElementById('genTeacherBtn').addEventListener('click', () => {
+    if (recalled && !confirm('前回とは別の、空っぽの新しい帳面を作ります。\n（今までの選手・記録は引き継がれません）\n本当に新しく作りますか？')) return;
     const token = genToken(24); // 48 hex chars
     const url = `${location.origin}${location.pathname}?t=${token}`;
+    rememberTeacherUrl(url); // この端末に覚えておく
     document.getElementById('genTeacherResult').innerHTML = `
       <p><strong>あなた専用のURLです（必ずブックマーク・他言厳禁）</strong></p>
       <textarea readonly class="form-textarea short" style="font-size:12px">${url}</textarea>
       <a class="btn btn-primary" href="${url}" style="display:inline-block;margin-top:8px;text-decoration:none">このURLで開く</a>
+      <p class="small" style="margin-top:8px">このURLはこの端末が覚えました。次からはトップ画面の「前回の帳面を開く」からも入れます。</p>
     `;
   });
 }
@@ -676,14 +807,34 @@ function renderHome(root) {
   const journalBtn = mode === 'teacher'
     ? `<button class="link-btn journal-trigger" id="journalBtn">🛋 楽屋へ</button>`
     : '';
+  // けろ先生：いま選んでいる選手にお題を渡す導線
+  const promptBtn = (mode === 'teacher' && state.activeStudentToken)
+    ? `<button class="link-btn prompt-trigger" id="promptBtn">🎯 お題を渡す</button>`
+    : '';
+
+  // 選手：けろ先生から届いた、まだ答えていないお題
+  let promptCards = '';
+  if (mode === 'student') {
+    const open = openPromptsFor(studentToken);
+    if (open.length > 0) {
+      promptCards = `<div class="prompt-inbox">${open.map(p => `
+        <button class="prompt-card" data-prompt-id="${p.id}">
+          <span class="prompt-card-label">けろ先生からのお題</span>
+          <span class="prompt-card-body">${escapeHtml(p.body)}</span>
+          <span class="prompt-card-cta">この問いに、断片で答える →</span>
+        </button>`).join('')}</div>`;
+    }
+  }
 
   root.innerHTML = `
     ${studentBar}
     ${dayLetter}
+    ${promptCards}
     ${filterBar}
     <div class="home-actions">
       <button class="compose-btn" id="composeBtn">＋ 投稿する</button>
       ${rereadBtn}
+      ${promptBtn}
       ${journalBtn}
     </div>
     ${timeline}
@@ -705,6 +856,15 @@ function renderHome(root) {
   if (journalBtnEl) {
     journalBtnEl.addEventListener('click', () => navigate('journal'));
   }
+
+  const promptBtnEl = document.getElementById('promptBtn');
+  if (promptBtnEl) {
+    promptBtnEl.addEventListener('click', () => navigate('prompt'));
+  }
+
+  root.querySelectorAll('.prompt-card').forEach(el => {
+    el.addEventListener('click', () => navigate('compose', { answeringPromptId: el.dataset.promptId }));
+  });
 
   const dayLetterEl = root.querySelector('.day-letter-card');
   if (dayLetterEl) {
@@ -730,14 +890,20 @@ function renderPostCard(post) {
   const bodyHtml = post.body
     ? `<div class="post-body">${escapeHtml(post.body)}</div>`
     : `<div class="post-body silent">（無言の便り）</div>`;
+  // 選手側：まだ受け取っていない地の文返しに「届いた印」
+  // 未読のときは件数を省き、バッジだけにする（狭幅でも1行に収まり、窮屈にならない）
+  const unread = mode === 'student' && hasUnreadTeacherResponse(post);
+  const footInner = unread
+    ? `<span class="unread-dot">新しい返しが届いています</span>`
+    : respLine;
   return `
-    <li class="post-card" data-post-id="${post.id}">
+    <li class="post-card ${unread ? 'has-unread' : ''}" data-post-id="${post.id}">
       <div class="post-meta">
         <span class="post-date">${fmtDate(post.date)}</span>
         ${chips}
       </div>
       ${bodyHtml}
-      <div class="post-foot">${respLine}</div>
+      <div class="post-foot">${footInner}</div>
     </li>
   `;
 }
@@ -757,6 +923,11 @@ function renderCompose(root) {
   }
   const isEdit = !!editingPost;
 
+  // お題に答えるモード（選手がホームのお題カードから来たとき）
+  const answeringPrompt = (!isEdit && state.answeringPromptId)
+    ? (state.promptsByStudent[targetToken] || []).find(p => p.id === state.answeringPromptId)
+    : null;
+
   const initial = {
     date: editingPost?.date || todayISO(),
     body: editingPost?.body || '',
@@ -764,7 +935,15 @@ function renderCompose(root) {
     categories: editingPost?.categories || [],
   };
 
+  const promptQuoteHtml = answeringPrompt
+    ? `<div class="compose-prompt-quote">
+         <span class="compose-prompt-quote-label">けろ先生からのお題</span>
+         <span class="compose-prompt-quote-body">${escapeHtml(answeringPrompt.body)}</span>
+       </div>`
+    : '';
+
   root.innerHTML = `
+    ${promptQuoteHtml}
     <div class="form-group">
       <label class="form-label">選手</label>
       <div style="font-size:15px;">${escapeHtml(studentName)}</div>
@@ -889,8 +1068,13 @@ function renderCompose(root) {
         state.editingPostId = null;
         navigate('detail', { postId: editingId });
       } else {
+        if (answeringPrompt) payload.fromPromptId = answeringPrompt.id;
         const id = await createPost(targetToken, payload);
         localStorage.removeItem(draftKey);
+        if (answeringPrompt) {
+          await markPromptAnswered(targetToken, answeringPrompt.id, id).catch(() => {});
+          state.answeringPromptId = null;
+        }
         navigate('detail', { postId: id });
       }
     } catch (err) {
@@ -948,10 +1132,20 @@ function renderDetail(root) {
     : responses.map(r => {
         const from = r.from || 'teacher';
         const fromLabel = from === 'teacher' ? 'けろ先生' : 'あなた';
+        // 受け取りのしるべ：けろ先生から見て、選手がこの返しを読んだか（採点ではなく受領の気配）
+        const readByStudent = post.studentReadAt && r.createdAt <= post.studentReadAt;
+        const receiptHtml = (mode === 'teacher' && from === 'teacher')
+          ? `<div class="receipt ${readByStudent ? 'read' : 'unread'}">${
+              readByStudent
+                ? `🌱 選手が受け取りました · ${fmtAgo(post.studentReadAt)}`
+                : 'まだ受け取りの気配はありません'
+            }</div>`
+          : '';
         return `
         <div class="response-item from-${from}">
           <div class="ts"><span class="from-label">${fromLabel}</span> · ${fmtTimestamp(r.createdAt)}</div>
           <div class="body">${escapeHtml(r.body)}</div>
+          ${receiptHtml}
         </div>
       `;
       }).join('');
@@ -1067,6 +1261,11 @@ function renderDetail(root) {
   }
 
   if (mode === 'student') {
+    // 受け取りのしるべ：開いた時点で、まだ受け取っていない地の文返しを既読にする
+    if (hasUnreadTeacherResponse(post)) {
+      markPostRead(targetToken, post.id);
+    }
+
     document.getElementById('addResponseBtn').addEventListener('click', async () => {
       const ta = document.getElementById('responseInput');
       const body = ta.value.trim();
@@ -1130,10 +1329,14 @@ function renderDetail(root) {
   }
 
   // けろ先生のpresence送信（heartbeat）
-  if (mode === 'teacher') {
+  // 投稿を開くたびに1回だけ初期化する（再レンダーでは再起動しない＝無限ループ防止）
+  if (mode === 'teacher' && presencePostId !== post.id) {
+    presencePostId = post.id;
+    const presenceToken = targetToken;
+    const presencePost = post.id;
     const sendPresence = async () => {
       try {
-        await updateDoc(postRef(targetToken, post.id), {
+        await updateDoc(postRef(presenceToken, presencePost), {
           coachActiveSince: new Date().toISOString(),
         });
       } catch {}
@@ -1142,8 +1345,9 @@ function renderDetail(root) {
     const heartbeat = setInterval(sendPresence, 30000);
     state.cleanupHandlers.push(() => {
       clearInterval(heartbeat);
+      presencePostId = null;
       // 離脱時にpresenceクリア
-      updateDoc(postRef(targetToken, post.id), { coachActiveSince: null }).catch(() => {});
+      updateDoc(postRef(presenceToken, presencePost), { coachActiveSince: null }).catch(() => {});
     });
   }
 }
@@ -1237,6 +1441,102 @@ function renderJournal(root) {
         alert('削除に失敗しました：' + err.message);
       }
     });
+  });
+}
+
+function renderPrompt(root) {
+  if (mode !== 'teacher') {
+    root.innerHTML = `<div class="empty">この画面はけろ先生専用です。</div>`;
+    return;
+  }
+  const tk = state.activeStudentToken;
+  const student = state.students.find(s => s.token === tk);
+  if (!tk || !student) {
+    root.innerHTML = `<div class="empty">選手が選ばれていません。<br><span class="small">ホームで選手を選んでから、お題を渡してください。</span></div>`;
+    return;
+  }
+
+  const prompts = (state.promptsByStudent[tk] || []).slice()
+    .sort((a, b) => {
+      // 未回答を上に、その中で新しい順
+      const aOpen = a.status !== 'answered';
+      const bOpen = b.status !== 'answered';
+      if (aOpen !== bOpen) return aOpen ? -1 : 1;
+      return a.createdAt < b.createdAt ? 1 : -1;
+    });
+
+  const listHtml = prompts.length === 0
+    ? `<div class="empty" style="padding:16px 0">まだお題はありません。<br><span class="small">問いはきっかけ。気が向いた一言を、そっと置いてみてください。</span></div>`
+    : prompts.map(p => {
+        const answered = p.status === 'answered';
+        const statusTag = answered
+          ? `<span class="prompt-status answered">答えが返ってきました · ${fmtAgo(p.answeredAt)}</span>`
+          : `<span class="prompt-status open">まだ答えを待っています</span>`;
+        const openLink = answered && p.answeredPostId
+          ? `<button class="link-btn" data-action="open-answer" data-post-id="${p.answeredPostId}">答えを見る</button>`
+          : '';
+        return `
+          <article class="prompt-entry ${answered ? 'is-answered' : ''}" data-prompt-id="${p.id}">
+            <div class="prompt-entry-body">${escapeHtml(p.body)}</div>
+            <div class="prompt-entry-foot">
+              ${statusTag}
+              <span class="prompt-entry-actions">
+                ${openLink}
+                <button class="link-btn danger" data-action="delete-prompt">取り消す</button>
+              </span>
+            </div>
+          </article>`;
+      }).join('');
+
+  root.innerHTML = `
+    <div class="prompt-intro">
+      <strong>${escapeHtml(student.name)}</strong> さんへ、お題を渡します。<br>
+      <span class="small">指示や課題ではなく、立ち止まるきっかけの一問を。選手のホームにそっと届きます。書かないという選択も、選手の側に残されています。</span>
+    </div>
+
+    <section class="prompt-form">
+      <textarea class="form-textarea" id="promptInput" placeholder="例：今日いちばん、体が素直に動いた瞬間は？"></textarea>
+      <button class="btn btn-primary" id="addPromptBtn" style="margin-top:8px">この問いを渡す</button>
+    </section>
+
+    <div class="prompt-list">
+      ${listHtml}
+    </div>
+  `;
+
+  document.getElementById('addPromptBtn').addEventListener('click', async () => {
+    const ta = document.getElementById('promptInput');
+    const body = ta.value.trim();
+    if (!body) return;
+    const btn = document.getElementById('addPromptBtn');
+    btn.disabled = true;
+    try {
+      await addPrompt(tk, body);
+      ta.value = '';
+    } catch (err) {
+      alert('お題の保存に失敗しました：' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  root.querySelectorAll('.prompt-entry').forEach(el => {
+    const id = el.dataset.promptId;
+    const delBtn = el.querySelector('[data-action="delete-prompt"]');
+    if (delBtn) {
+      delBtn.addEventListener('click', async () => {
+        if (!confirm('このお題を取り消しますか？')) return;
+        try {
+          await deletePrompt(tk, id);
+        } catch (err) {
+          alert('取り消しに失敗しました：' + err.message);
+        }
+      });
+    }
+    const openBtn = el.querySelector('[data-action="open-answer"]');
+    if (openBtn) {
+      openBtn.addEventListener('click', () => navigate('detail', { postId: openBtn.dataset.postId }));
+    }
   });
 }
 
@@ -1699,12 +1999,18 @@ async function init() {
 
   try {
     if (mode === 'teacher') {
+      // けろ先生用URLで開けたら、この端末に覚えておく（次回トップから戻れる・迷子防止）
+      rememberTeacherUrl(`${location.origin}${location.pathname}?t=${teacherToken}`);
       await loadTeacherIndex();
       subscribeTeacherIndex();
-      state.students.forEach(s => subscribeStudentPosts(s.token));
+      state.students.forEach(s => {
+        subscribeStudentPosts(s.token);
+        subscribeStudentPrompts(s.token);
+      });
       subscribeJournal();
     } else if (mode === 'student') {
       subscribeStudentPosts(studentToken);
+      subscribeStudentPrompts(studentToken);
       state.activeStudentToken = studentToken;
     }
     state.loading = false;

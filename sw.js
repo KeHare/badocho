@@ -2,7 +2,7 @@
 // 役割：オフライン時の起動と静的アセットのキャッシュ
 // Firestoreデータはキャッシュせず常にネットワークから取得
 
-const CACHE_VERSION = 'badcho-v3';
+const CACHE_VERSION = 'badcho-v4';
 const PRECACHE_ASSETS = [
   './manifest.webmanifest',
   './icon-192.png',
